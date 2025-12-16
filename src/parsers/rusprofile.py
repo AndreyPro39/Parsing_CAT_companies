@@ -2,368 +2,258 @@ import requests
 from bs4 import BeautifulSoup
 import re
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, List
+from urllib.parse import quote_plus
+
 
 class RusprofileParser:
-    """Парсер для получения финансовых данных компании с Rusprofile.ru"""
+    """
+    Парсер для получения информации о компаниях с Rusprofile.ru
+    """
+    
+    SEARCH_URL = "https://www.rusprofile.ru/search"
+    BASE_URL = "https://www.rusprofile.ru"
     
     def __init__(self):
-        self.base_url = "https://www.rusprofile.ru"
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
         }
         self.session = requests.Session()
         self.session.headers.update(self.headers)
     
-    def get_company_info(self, inn: str) -> Optional[Dict]:
-        """Основной метод: получает все данные компании по ИНН"""
+    def search_inn_by_name(self, company_name: str) -> Optional[Dict]:
+        """
+        Ищет компанию по названию и возвращает первую найденную с ИНН
+        
+        Args:
+            company_name: Название компании для поиска
+            
+        Returns:
+            Словарь с информацией о компании или None, если не найдена
+        """
+        print(f"  Поиск ИНН для: '{company_name}'")
+        
+        # Кодируем название для URL
+        encoded_name = quote_plus(company_name)
+        search_url = f"{self.SEARCH_URL}?query={encoded_name}&type=ul"
+        
         try:
-            # 1. Получаем HTML страницы компании
-            html = self._fetch_company_page(inn)
-            if not html:
-                return None
-            
-            # 2. Парсим данные
-            soup = BeautifulSoup(html, 'html.parser')
-            
-            company_data = {
-                'inn': inn,
-                'name': self._extract_name(soup),
-                'revenue': self._extract_revenue(soup),
-                'employees': self._extract_employees(soup),
-                'site': self._extract_website(soup),
-                'okved_main': self._extract_okved(soup),
-                'full_address': self._extract_address(soup),
-                'ceo': self._extract_ceo(soup),
-                'registration_date': self._extract_reg_date(soup),
-                'status': self._extract_status(soup)
-            }
-            
-            return company_data
-            
-        except Exception as e:
-            print(f"❌ Ошибка при парсинге компании {inn}: {e}")
-            return None
-    
-    def _fetch_company_page(self, inn: str) -> Optional[str]:
-        """Загружает страницу компании"""
-        try:
-            search_url = f"{self.base_url}/search?query={inn}&type=ul"
             response = self.session.get(search_url, timeout=10)
             response.raise_for_status()
+            response.encoding = 'utf-8'
             
-            # Ищем ссылку на карточку компании
             soup = BeautifulSoup(response.text, 'html.parser')
-            company_link = soup.find('a', class_='company-item')
             
-            if company_link and 'href' in company_link.attrs:
-                company_url = self.base_url + company_link['href']
-                print(f"🔗 Найдена страница: {company_url}")
-                
-                time.sleep(1)  # Уважаем сервер
-                company_response = self.session.get(company_url, timeout=10)
-                company_response.raise_for_status()
-                
-                return company_response.text
-            else:
-                print(f"⚠️ Компания с ИНН {inn} не найдена")
+            # Ищем первую карточку компании в результатах поиска
+            company_card = soup.find('div', class_='company-item')
+            
+            if not company_card:
+                # Пробуем другие возможные селекторы
+                company_card = soup.find('div', class_=re.compile(r'company-item'))
+            
+            if not company_card:
+                print(f"    Компания '{company_name}' не найдена в результатах поиска")
                 return None
+            
+            # Извлекаем название компании
+            name_element = company_card.find('a', class_='company-name')
+            company_name_found = name_element.get_text(strip=True) if name_element else company_name
+            
+            # Извлекаем ИНН
+            inn_element = company_card.find('span', class_='copy-target')
+            if not inn_element:
+                # Пробуем другой селектор для ИНН
+                inn_text = None
+                for div in company_card.find_all('div', class_='company-row'):
+                    text = div.get_text(strip=True)
+                    if 'ИНН' in text:
+                        inn_text = text
+                        break
                 
+                if inn_text:
+                    # Извлекаем ИНН из текста
+                    inn_match = re.search(r'ИНН\s*(\d{10,12})', inn_text)
+                    inn = inn_match.group(1) if inn_match else None
+                else:
+                    inn = None
+            else:
+                inn = inn_element.get_text(strip=True)
+            
+            if not inn or not inn.isdigit():
+                print(f"    Не удалось извлечь ИНН для '{company_name_found}'")
+                return None
+            
+            # Извлекаем ссылку на страницу компании
+            link_element = company_card.find('a', class_='company-name')
+            company_url = f"{self.BASE_URL}{link_element['href']}" if link_element and 'href' in link_element.attrs else None
+            
+            print(f"    Найдено: {company_name_found} (ИНН: {inn})")
+            
+            return {
+                'name': company_name_found,
+                'inn': inn,
+                'rusprofile_url': company_url,
+                'source_query': company_name
+            }
+            
         except requests.exceptions.RequestException as e:
-            print(f"⚠️ Ошибка сети для ИНН {inn}: {e}")
+            print(f"    Ошибка сети при поиске '{company_name}': {e}")
             return None
-    
-    def _extract_name(self, soup: BeautifulSoup) -> str:
-        """Извлекает название компании"""
-        try:
-            name_tag = soup.find('h1', class_='company-name')
-            if name_tag:
-                return name_tag.get_text(strip=True)
-            
-            # Альтернативный поиск
-            name_tag = soup.find('div', {'itemprop': 'name'})
-            if name_tag:
-                return name_tag.get_text(strip=True)
-        except:
-            pass
-        return f"Компания_{soup.find('title').get_text()[:50]}"
-    
-    def _extract_revenue(self, soup: BeautifulSoup) -> int:
-        """Извлекает выручку (последний доступный год)"""
-        try:
-            # Ищем блок с финансовыми показателями
-            fin_section = soup.find('div', class_='company-requisites')
-            if not fin_section:
-                fin_section = soup.find('section', id='finance')
-            
-            if fin_section:
-                # Ищем выручку по тексту
-                fin_text = fin_section.get_text()
-                
-                # Паттерны для поиска выручки
-                patterns = [
-                    r'Выручка[^0-9]*([0-9, ]+)\s*(тыс|млн|млрд|₽|руб)',
-                    r'Revenue[^0-9]*([0-9, ]+)\s*(тыс|млн|млрд|₽|руb)',
-                    r'ВЫРУЧКА[^0-9]*([0-9, ]+)\s*(тыс|млн|млрд|₽|руб)'
-                ]
-                
-                for pattern in patterns:
-                    match = re.search(pattern, fin_text, re.IGNORECASE)
-                    if match:
-                        revenue_str = match.group(1).replace(' ', '').replace(',', '.')
-                        multiplier = self._get_multiplier(match.group(2).lower() if match.group(2) else '')
-                        revenue = float(revenue_str) * multiplier
-                        return int(revenue)
-            
-            # Если не нашли в блоке, ищем в таблице
-            revenue_cells = soup.find_all('td', string=re.compile(r'Выручка|Revenue', re.I))
-            for cell in revenue_cells:
-                next_cell = cell.find_next('td')
-                if next_cell:
-                    value_text = next_cell.get_text(strip=True)
-                    return self._parse_financial_value(value_text)
-                    
         except Exception as e:
-            print(f"⚠️ Ошибка извлечения выручки: {e}")
+            print(f"    Ошибка при обработке результатов поиска для '{company_name}': {e}")
+            return None
+        finally:
+            # Уважаем сайт - делаем паузу между запросами
+            time.sleep(1)
+    
+    def get_company_info(self, inn: str) -> Optional[Dict]:
+        """
+        Получает подробную информацию о компании по ИНН
         
-        return 0
-    
-    def _extract_employees(self, soup: BeautifulSoup) -> Optional[int]:
-        """Извлекает количество сотрудников"""
-        try:
-            # Ищем по ключевым словам
-            employee_text = soup.find(string=re.compile(r'сотрудник|работник|персонал|employees|staff', re.I))
-            if employee_text:
-                # Ищем число рядом с текстом
-                parent = employee_text.parent
-                if parent:
-                    text = parent.get_text()
-                    match = re.search(r'(\d[\d ]*)\s*сотрудник', text, re.I)
-                    if match:
-                        return int(match.group(1).replace(' ', ''))
+        Args:
+            inn: ИНН компании (10 или 12 цифр)
             
-            # Альтернативный поиск в блоке "Общие сведения"
-            info_section = soup.find('div', class_='company-info')
-            if info_section:
-                text = info_section.get_text()
-                matches = re.findall(r'(\d+)\s*(?:человек|сотрудник|работник)', text, re.I)
-                if matches:
-                    return int(matches[-1])
-                    
-        except:
-            pass
-        return None
-    
-    def _extract_website(self, soup: BeautifulSoup) -> Optional[str]:
-        """Извлекает сайт компании"""
+        Returns:
+            Словарь с информацией о компании или None в случае ошибки
+        """
+        print(f"  Получение информации по ИНН: {inn}")
+        
+        if not inn or not re.match(r'^\d{10,12}$', inn):
+            print(f"    Неверный формат ИНН: {inn}")
+            return None
+        
+        company_url = f"{self.BASE_URL}/ajax/query"
+        
         try:
-            # Ищем ссылку с классом или атрибутом
-            website_tag = soup.find('a', {'class': re.compile(r'website|site|url', re.I)})
-            if not website_tag:
-                website_tag = soup.find('a', href=re.compile(r'^https?://'))
+            # Отправляем POST-запрос для получения данных
+            payload = {
+                'query': inn,
+                'action': 'search',
+                'type': 'ul',
+                'with_aliases': '1'
+            }
             
-            if website_tag and 'href' in website_tag.attrs:
-                url = website_tag['href']
-                if not url.startswith('http'):
-                    url = 'http://' + url
-                return url
+            response = self.session.post(company_url, data=payload, timeout=10)
+            response.raise_for_status()
+            
+            # Парсим JSON ответ
+            data = response.json()
+            
+            if data.get('success') and data.get('ul_count') > 0:
+                company_data = data['ul_list'][0]
                 
-        except:
-            pass
-        return None
-    
-    def _extract_okved(self, soup: BeautifulSoup) -> Optional[str]:
-        """Извлекает основной ОКВЭД"""
-        try:
-            # Ищем ОКВЭД в тексте
-            okved_tags = soup.find_all(string=re.compile(r'ОКВЭД|ОКВЭД2|Вид деятельности', re.I))
-            for tag in okved_tags:
-                parent = tag.parent
-                if parent:
-                    # Ищем код ОКВЭД (формат XX.XX или XX.XX.X)
-                    text = parent.get_text()
-                    match = re.search(r'(\d{2}\.\d{2}(?:\.\d{1,2})?)', text)
-                    if match:
-                        return match.group(1)
-            
-            # Поиск в блоке деятельности
-            activity_section = soup.find('div', class_=re.compile(r'activity|business|деятельность', re.I))
-            if activity_section:
-                text = activity_section.get_text()
-                match = re.search(r'(\d{2}\.\d{2}(?:\.\d{1,2})?)', text)
-                if match:
-                    return match.group(1)
-                    
-        except:
-            pass
-        return None
-    
-    def _extract_address(self, soup: BeautifulSoup) -> Optional[str]:
-        """Извлекает полный адрес"""
-        try:
-            address_tag = soup.find('span', {'itemprop': 'address'})
-            if not address_tag:
-                address_tag = soup.find('div', class_='company-address')
-            
-            if address_tag:
-                return address_tag.get_text(strip=True)
+                # Извлекаем основную информацию
+                result = {
+                    'inn': inn,
+                    'name': company_data.get('name', ''),
+                    'full_name': company_data.get('full_name', ''),
+                    'ogrn': company_data.get('ogrn', ''),
+                    'okved': company_data.get('okved', ''),
+                    'okved_main': company_data.get('okved_main', ''),
+                    'status': company_data.get('status', ''),
+                    'registration_date': company_data.get('registration_date', ''),
+                    'authorized_capital': self._parse_money(company_data.get('authorized_capital', '')),
+                    'revenue': self._parse_money(company_data.get('revenue', '')),
+                    'profit': self._parse_money(company_data.get('profit', '')),
+                    'employees': company_data.get('employees_count', ''),
+                    'site': company_data.get('site', ''),
+                    'email': company_data.get('email', ''),
+                    'phone': company_data.get('phone', ''),
+                    'address': company_data.get('address', ''),
+                    'ceo': company_data.get('ceo_name', ''),
+                    'source': 'rusprofile.ru'
+                }
                 
-        except:
-            pass
-        return None
-    
-    def _extract_ceo(self, soup: BeautifulSoup) -> Optional[str]:
-        """Извлекает ФИО генерального директора"""
-        try:
-            ceo_tags = soup.find_all(string=re.compile(r'Генеральный директор|Директор|Руководитель|CEO', re.I))
-            for tag in ceo_tags:
-                parent = tag.parent
-                if parent:
-                    # Берем следующий текстовый элемент после "Директор"
-                    text = parent.get_text()
-                    # Ищем ФИО (русские буквы, пробелы, дефисы)
-                    match = re.search(r'(?:Директор|Ген\.\s*директор|Руководитель)[:\s]+([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?)', text)
-                    if match:
-                        return match.group(1)
-        except:
-            pass
-        return None
-    
-    def _extract_reg_date(self, soup: BeautifulSoup) -> Optional[str]:
-        """Извлекает дату регистрации"""
-        try:
-            reg_tags = soup.find_all(string=re.compile(r'Дата регистрации|Зарегистрирована|Регистрация', re.I))
-            for tag in reg_tags:
-                parent = tag.parent
-                if parent:
-                    text = parent.get_text()
-                    # Ищем дату в формате ДД.ММ.ГГГГ
-                    match = re.search(r'(\d{2}\.\d{2}\.\d{4})', text)
-                    if match:
-                        return match.group(1)
-        except:
-            pass
-        return None
-    
-    def _extract_status(self, soup: BeautifulSoup) -> str:
-        """Определяет статус компании"""
-        try:
-            status_tags = soup.find_all(string=re.compile(r'Статус|Состояние|Status', re.I))
-            for tag in status_tags:
-                parent = tag.parent
-                if parent:
-                    text = parent.get_text()
-                    if re.search(r'действующ|active|working', text, re.I):
-                        return 'Действующая'
-                    elif re.search(r'ликвидир|банкрот|liquidated|bankrupt', text, re.I):
-                        return 'Ликвидирована'
-        except:
-            pass
-        return 'Неизвестно'
-    
-    def _parse_financial_value(self, text: str) -> int:
-        """Парсит финансовые значения с множителями (тыс, млн, млрд)"""
-        try:
-            text = text.lower().strip()
-            # Удаляем валюту и пробелы
-            text = re.sub(r'[₽руб$€]', '', text)
-            text = text.replace(' ', '').replace(',', '.')
+                print(f"    Получена информация для {result['name']}")
+                return result
             
-            # Определяем множитель
-            multiplier = 1
-            if 'млрд' in text:
-                multiplier = 1_000_000_000
-                text = text.replace('млрд', '')
-            elif 'млн' in text:
-                multiplier = 1_000_000
-                text = text.replace('млн', '')
-            elif 'тыс' in text:
-                multiplier = 1_000
-                text = text.replace('тыс', '')
+            print(f"    Компания с ИНН {inn} не найдена")
+            return None
             
-            # Извлекаем число
-            match = re.search(r'(\d+\.?\d*)', text)
-            if match:
-                return int(float(match.group(1)) * multiplier)
-        except:
-            pass
-        return 0
-    
-    def _get_multiplier(self, unit: str) -> int:
-        """Возвращает числовой множитель для единиц измерения"""
-        multipliers = {
-            'тыс': 1_000,
-            'млн': 1_000_000,
-            'млрд': 1_000_000_000,
-            'трлн': 1_000_000_000_000,
-            'k': 1_000,
-            'm': 1_000_000,
-            'b': 1_000_000_000
-        }
-        return multipliers.get(unit.lower(), 1)
-    
-    def search_by_name(self, company_name: str, limit: int = 10) -> list:
-        """Ищет компании по названию (возвращает список ИНН)"""
-        try:
-            search_query = company_name.replace(' ', '+')
-            url = f"{self.base_url}/search?query={search_query}"
-            
-            response = self.session.get(url, timeout=10)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            companies = []
-            company_items = soup.find_all('div', class_='company-item')
-            
-            for item in company_items[:limit]:
-                inn_tag = item.find('span', string=re.compile(r'ИНН'))
-                if inn_tag:
-                    inn_text = inn_tag.get_text()
-                    inn_match = re.search(r'\b\d{10,12}\b', inn_text)
-                    if inn_match:
-                        companies.append({
-                            'inn': inn_match.group(0),
-                            'name': item.find('a', class_='company-item-title').get_text(strip=True) if item.find('a', class_='company-item-title') else 'Неизвестно'
-                        })
-            
-            return companies
-            
+        except requests.exceptions.RequestException as e:
+            print(f"    Ошибка сети при получении информации по ИНН {inn}: {e}")
+            return None
+        except (KeyError, IndexError, ValueError) as e:
+            print(f"    Ошибка парсинга данных для ИНН {inn}: {e}")
+            return None
         except Exception as e:
-            print(f"❌ Ошибка поиска по названию: {e}")
-            return []
+            print(f"    Неожиданная ошибка для ИНН {inn}: {e}")
+            return None
+        finally:
+            time.sleep(1)
+    
+    def _parse_money(self, value: str) -> float:
+        """
+        Преобразует строковое значение денег в число
+        
+        Args:
+            value: Строка вида "1 234 567 ₽" или "12.34 млн ₽"
+            
+        Returns:
+            Числовое значение в рублях
+        """
+        if not value:
+            return 0.0
+        
+        try:
+            # Убираем пробелы и символ валюты
+            clean_value = value.replace(' ', '').replace('₽', '').replace(',', '.')
+            
+            # Проверяем наличие "млн", "тыс" и т.д.
+            if 'млн' in clean_value:
+                number = float(re.search(r'[\d.]+', clean_value).group())
+                return number * 1_000_000
+            elif 'тыс' in clean_value:
+                number = float(re.search(r'[\d.]+', clean_value).group())
+                return number * 1_000
+            else:
+                return float(re.search(r'[\d.]+', clean_value).group())
+        except:
+            return 0.0
+    
+    def search_multiple_companies(self, company_names: List[str]) -> List[Dict]:
+        """
+        Ищет несколько компаний по названиям
+        
+        Args:
+            company_names: Список названий компаний
+            
+        Returns:
+            Список найденных компаний с ИНН
+        """
+        results = []
+        
+        for name in company_names:
+            company_info = self.search_inn_by_name(name)
+            if company_info:
+                results.append(company_info)
+        
+        return results
 
-# --- Пример использования ---
+
+# Пример использования
 if __name__ == "__main__":
-    print("🧪 Тестирование парсера Rusprofile")
     parser = RusprofileParser()
     
-    # Тестовые ИНН известных компаний
-    test_inns = [
-        "4574170000",  # 1C
-        "7736207543",  # Яндекс
-        "7707049388",  # Сбер
-        "7727734900"   # Тинькофф
-    ]
+    # Тестируем поиск по названию
+    test_companies = ["Яндекс", "Сбербанк", "Газпром"]
     
-    for inn in test_inns:
-        print(f"\n📊 Парсим компанию с ИНН {inn}...")
-        data = parser.get_company_info(inn)
-        
-        if data:
-            print(f"✅ Название: {data.get('name')}")
-            print(f"   Выручка: {data.get('revenue'):,} руб" if data.get('revenue') else "   Выручка: не найдена")
-            print(f"   Сотрудники: {data.get('employees')}" if data.get('employees') else "   Сотрудники: не найдено")
-            print(f"   Сайт: {data.get('site')}" if data.get('site') else "   Сайт: не найден")
-            print(f"   ОКВЭД: {data.get('okved_main')}" if data.get('okved_main') else "   ОКВЭД: не найден")
-            print(f"   Статус: {data.get('status')}")
+    print("Тестирование поиска компаний по названиям:")
+    for company in test_companies:
+        result = parser.search_inn_by_name(company)
+        if result:
+            print(f"  Найдено: {result['name']} (ИНН: {result['inn']})")
             
-            # Проверяем критерий 100 млн рублей
-            if data.get('revenue', 0) >= 100_000_000:
-                print("   🟢 Критерий выручки выполнен (>100 млн руб)")
-            else:
-                print("   🔴 Критерий выручки не выполнен")
+            # Получаем полную информацию
+            full_info = parser.get_company_info(result['inn'])
+            if full_info:
+                print(f"    Выручка: {full_info.get('revenue', 'не указана')}")
+                print(f"    Сотрудники: {full_info.get('employees', 'не указано')}")
+                print(f"    ОКВЭД: {full_info.get('okved_main', 'не указан')}")
         else:
-            print(f"❌ Не удалось получить данные")
-        
-        time.sleep(2)  # Пауза между запросами
+            print(f"  Не найдено: {company}")
