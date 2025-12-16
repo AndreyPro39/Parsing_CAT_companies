@@ -1,8 +1,8 @@
 import requests
 from bs4 import BeautifulSoup
-import csv
 import time
 import re
+import csv
 from typing import List, Dict
 
 # Класс-заглушка для Rusprofile, пока не реализован парсинг
@@ -137,4 +137,5 @@ if __name__ == "__main__":
     else:
         print("❌ Нет данных для сохранения")
     pass
+
 
